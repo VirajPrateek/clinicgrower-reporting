@@ -7,6 +7,7 @@ import os
 from urllib.parse import urlencode
 from datetime import datetime, date, timedelta
 from google.api_core.exceptions import NotFound
+from time import sleep
 
 # Configure logging for Cloud Logging
 logging.basicConfig(level=logging.INFO)
@@ -19,7 +20,6 @@ TABLE_ID = os.environ.get('TABLE_ID', 'daily_metrics')
 ACCOUNTS_URL = os.environ.get('ACCOUNTS_URL', 'https://mybusinessbusinessinformation.googleapis.com/v1/accounts')
 LOCATIONS_URL_BASE = os.environ.get('LOCATIONS_URL_BASE', 'https://mybusinessbusinessinformation.googleapis.com/v1')
 PERFORMANCE_URL_BASE = os.environ.get('PERFORMANCE_URL_BASE', 'https://businessprofileperformance.googleapis.com/v1')
-STORE_ID = os.environ.get('STORE_ID', 'unknown_store')
 
 # All available metrics
 METRICS = [
@@ -85,9 +85,10 @@ def create_bigquery_table():
             bigquery.SchemaField("account_id", "STRING", mode="REQUIRED"),
             bigquery.SchemaField("location_id", "STRING", mode="REQUIRED"),
             bigquery.SchemaField("location_title", "STRING"),
+            bigquery.SchemaField("store_code", "STRING"),
+            bigquery.SchemaField("is_verified", "BOOLEAN"),
             bigquery.SchemaField("date", "DATE", mode="REQUIRED"),
         ]
-        # Add a column for each metric
         for metric in METRICS:
             schema.append(bigquery.SchemaField(metric, "INTEGER", mode="NULLABLE"))
         schema.append(bigquery.SchemaField("load_timestamp", "TIMESTAMP", mode="REQUIRED"))
@@ -108,21 +109,34 @@ def create_bigquery_table():
         raise
 
 def list_accounts(access_token):
-    """List all GMB accounts."""
+    """List all GMB accounts with pagination."""
+    accounts = []
+    page_token = None
     try:
         headers = {
             'Authorization': f'Bearer {access_token}',
             'Content-Type': 'application/json'
         }
-        response = requests.get(ACCOUNTS_URL, headers=headers)
-        if response.status_code != 200:
-            logger.error(f"Accounts request failed: {response.status_code} {response.text}")
-            response.raise_for_status()
-        data = response.json()
-        accounts = data.get('accounts', [])
+        while True:
+            params = {'pageSize': 100}  # Max pageSize
+            if page_token:
+                params['pageToken'] = page_token
+            response = requests.get(ACCOUNTS_URL, headers=headers, params=params)
+            if response.status_code != 200:
+                logger.error(f"Accounts request failed: {response.status_code} {response.text}")
+                response.raise_for_status()
+            data = response.json()
+            new_accounts = data.get('accounts', [])
+            accounts.extend(new_accounts)
+            account_ids = [account['name'].split('/')[-1] for account in new_accounts]
+            logger.info(f"Fetched {len(new_accounts)} accounts in page: {account_ids}")
+            page_token = data.get('nextPageToken')
+            if not page_token:
+                break
         if not accounts:
             logger.warning("No accounts returned")
-        logger.info(f"Found {len(accounts)} accounts")
+        else:
+            logger.info(f"Found total {len(accounts)} accounts: {[a['name'].split('/')[-1] for a in accounts]}")
         return accounts
     except requests.HTTPError as e:
         logger.error(f"HTTP error listing accounts: {e}")
@@ -132,22 +146,45 @@ def list_accounts(access_token):
         return []
 
 def list_locations(access_token, account_id):
-    """List locations for a specific account."""
+    """List locations for a specific account with pagination."""
+    locations = []
+    page_token = None
     try:
-        locations_url = f"{LOCATIONS_URL_BASE}/accounts/{account_id}/locations?readMask=name,storeCode,title,websiteUri,relationshipData"
         headers = {
             'Authorization': f'Bearer {access_token}',
             'Content-Type': 'application/json'
         }
-        response = requests.get(locations_url, headers=headers)
-        if response.status_code != 200:
-            logger.error(f"Locations request failed for account {account_id}: {response.status_code} {response.text}")
-            response.raise_for_status()
-        data = response.json()
-        locations = data.get('locations', [])
+        while True:
+            params = {
+                'readMask': 'name,storeCode,title,metadata',
+                'pageSize': 100  # Max pageSize
+            }
+            if page_token:
+                params['pageToken'] = page_token
+            locations_url = f"{LOCATIONS_URL_BASE}/accounts/{account_id}/locations"
+            response = requests.get(locations_url, headers=headers, params=params)
+            if response.status_code != 200:
+                logger.error(f"Locations request failed for account {account_id}: {response.status_code} {response.text}")
+                response.raise_for_status()
+            data = response.json()
+            new_locations = data.get('locations', [])
+            locations.extend(new_locations)
+            location_info = [
+                {
+                    'location_id': loc['name'].split('/')[-1],
+                    'title': loc.get('title', 'Unknown'),
+                    'store_code': loc.get('storeCode', 'Unknown'),
+                    'is_verified': loc.get('metadata', {}).get('hasVoiceOfMerchant', False)
+                } for loc in new_locations
+            ]
+            logger.info(f"Fetched {len(new_locations)} locations for account {account_id}: {json.dumps(location_info, indent=2)}")
+            page_token = data.get('nextPageToken')
+            if not page_token:
+                break
         if not locations:
             logger.warning(f"No locations returned for account {account_id}")
-        logger.info(f"Found {len(locations)} locations for account {account_id}")
+        else:
+            logger.info(f"Found total {len(locations)} locations for account {account_id}")
         return locations
     except requests.HTTPError as e:
         logger.error(f"HTTP error listing locations for account {account_id}: {e}")
@@ -156,41 +193,56 @@ def list_locations(access_token, account_id):
         logger.error(f"Error listing locations for account {account_id}: {e}")
         return []
 
-def fetch_performance_data(access_token, location_id, start_date, end_date):
-    """Fetch performance data for a specific location and date range."""
-    try:
-        performance_url = f"{PERFORMANCE_URL_BASE}/locations/{location_id}:fetchMultiDailyMetricsTimeSeries"
-        headers = {
-            'Authorization': f'Bearer {access_token}',
-            'Content-Type': 'application/json'
-        }
-        params = {
-            'dailyRange.start_date.year': start_date.year,
-            'dailyRange.start_date.month': start_date.month,
-            'dailyRange.start_date.day': start_date.day,
-            'dailyRange.end_date.year': end_date.year,
-            'dailyRange.end_date.month': end_date.month,
-            'dailyRange.end_date.day': end_date.day
-        }
-        for metric in METRICS:
-            params[f'dailyMetrics'] = params.get('dailyMetrics', []) + [metric]
-        query_string = urlencode(params, doseq=True)
-        url = f"{performance_url}?{query_string}"
-        response = requests.get(url, headers=headers)
-        if response.status_code != 200:
-            logger.error(f"Performance request failed for location {location_id}: {response.status_code} {response.text}")
-            response.raise_for_status()
-        data = response.json()
-        logger.info(f"Retrieved performance data for location {location_id}")
-        return data
-    except requests.HTTPError as e:
-        logger.error(f"HTTP error fetching performance data for location {location_id}: {e}")
-        return None
-    except Exception as e:
-        logger.error(f"Error fetching performance data for location {location_id}: {e}")
-        return None
+def fetch_performance_data(access_token, location_id, location_title, store_code, is_verified, max_retries=3, delay=2):
+    """Fetch performance data for a specific location and date range with retries."""
+    performance_url = f"{PERFORMANCE_URL_BASE}/locations/{location_id}:fetchMultiDailyMetricsTimeSeries"
+    headers = {
+        'Authorization': f'Bearer {access_token}',
+        'Content-Type': 'application/json'
+    }
+    start_date = date(2025, 4, 1)
+    end_date = date(2025, 4, 30)
+    params = {
+        'dailyRange.start_date.year': start_date.year,
+        'dailyRange.start_date.month': start_date.month,
+        'dailyRange.start_date.day': start_date.day,
+        'dailyRange.end_date.year': end_date.year,
+        'dailyRange.end_date.month': end_date.month,
+        'dailyRange.end_date.day': end_date.day
+    }
+    for metric in METRICS:
+        params[f'dailyMetrics'] = params.get('dailyMetrics', []) + [metric]
+    query_string = urlencode(params, doseq=True)
+    url = f"{performance_url}?{query_string}"
+    
+    for attempt in range(max_retries):
+        try:
+            response = requests.get(url, headers=headers)
+            if response.status_code != 200:
+                logger.error(f"Performance request failed for location {location_id} ({location_title}, store_code: {store_code}, is_verified: {is_verified}): {response.status_code} {response.text}")
+                response.raise_for_status()
+            data = response.json()
+            logger.info(f"Retrieved performance data for location {location_id} ({location_title})")
+            return data
+        except requests.HTTPError as e:
+            if response.status_code == 403:
+                logger.error(f"Permission denied for location {location_id} ({location_title}, store_code: {store_code}, is_verified: {is_verified}): {response.text}")
+                return None
+            if response.status_code == 429:
+                logger.warning(f"Rate limit exceeded for location {location_id}. Retry {attempt+1}/{max_retries}")
+                if attempt == max_retries - 1:
+                    logger.error(f"Max retries reached for location {location_id}: {e}")
+                    return None
+                sleep(delay * (2 ** attempt))
+            else:
+                logger.error(f"HTTP error for location {location_id}: {e}")
+                return None
+        except Exception as e:
+            logger.error(f"Error fetching performance data for location {location_id} ({location_title}): {e}")
+            return None
+    return None
 
-def insert_metrics_to_bigquery(account_id, location_id, location_title, data):
+def insert_metrics_to_bigquery(account_id, location_id, location_title, store_code, is_verified, data):
     """Insert pivoted metrics into BigQuery."""
     try:
         client = bigquery.Client(project=PROJECT_ID)
@@ -198,7 +250,6 @@ def insert_metrics_to_bigquery(account_id, location_id, location_title, data):
         rows_to_insert = []
         load_timestamp = datetime.utcnow()
         
-        # Group metrics by date
         metrics_by_date = {}
         for metric_series in data.get('multiDailyMetricTimeSeries', []):
             for daily_metric in metric_series.get('dailyMetricTimeSeries', []):
@@ -206,19 +257,20 @@ def insert_metrics_to_bigquery(account_id, location_id, location_title, data):
                 time_series = daily_metric.get('timeSeries', {}).get('datedValues', [])
                 for dated_value in time_series:
                     date_str = dated_value.get('date', {})
-                    date_key = f"{date_str.get('year', 2025)}-{date_str.get('month', 3):02d}-{date_str.get('day', 1):02d}"
+                    date_key = f"{date_str.get('year', 2025)}-{date_str.get('month', 4):02d}-{date_str.get('day', 1):02d}"
                     value = int(dated_value.get('value', 0))
                     if date_key not in metrics_by_date:
                         metrics_by_date[date_key] = {metric: 0 for metric in METRICS}
                     metrics_by_date[date_key][metric_name] = value
         
-        # Create rows for each date
         for date_key, metric_values in metrics_by_date.items():
             row = {
-                'store_id': STORE_ID,
+                'store_id': store_code or 'unknown_store',
                 'account_id': account_id,
                 'location_id': location_id,
                 'location_title': location_title,
+                'store_code': store_code or 'unknown_store',
+                'is_verified': is_verified,
                 'date': date_key,
                 'load_timestamp': load_timestamp.strftime('%Y-%m-%d %H:%M:%S')
             }
@@ -229,60 +281,74 @@ def insert_metrics_to_bigquery(account_id, location_id, location_title, data):
         if rows_to_insert:
             errors = client.insert_rows_json(table_ref, rows_to_insert)
             if errors:
-                logger.error(f"Errors inserting rows to BigQuery: {errors}")
+                logger.error(f"Errors inserting rows to BigQuery for location {location_id} ({location_title}): {errors}")
                 return False
-            logger.info(f"Inserted {len(rows_to_insert)} rows for location {location_id}")
+            logger.info(f"Inserted {len(rows_to_insert)} rows for location {location_id} ({location_title})")
             return True
-        logger.warning(f"No data to insert for location {location_id}")
+        logger.warning(f"No data to insert for location {location_id} ({location_title})")
         return False
     except Exception as e:
-        logger.error(f"Error inserting data to BigQuery for location {location_id}: {e}")
+        logger.error(f"Error inserting data to BigQuery for location {location_id} ({location_title}): {e}")
         return False
 
 @functions_framework.http
 def gmb_fetch_performance(request):
     """HTTP Cloud Run function to fetch GMB metrics and store in BigQuery."""
     try:
-        # Initialize BigQuery table
         create_bigquery_table()
-        
-        # Get date range from request or default to March 2025
         request_json = request.get_json(silent=True) or {}
-        if request_json.get('daily'):
-            start_date = date.today() - timedelta(days=1)
-            end_date = start_date
-        else:
-            start_date = date(2025, 3, 1)
-            end_date = date(2025, 3, 31)
+        start_date = date(2025, 4, 1)
+        end_date = date(2025, 4, 30)
         
         access_token = get_access_token()
-        
-        # List all accounts
         accounts = list_accounts(access_token)
         if not accounts:
             logger.error("No accounts found")
-            return {'status': 'error', 'message': 'No accounts found'}, 500
+            return {'status': 'error', 'message': 'No accounts found', 'failed_locations': []}, 500
         
-        # Process each account and its locations
         processed_locations = 0
+        failed_locations = []
         for account in accounts:
             account_id = account['name'].split('/')[-1]
             locations = list_locations(access_token, account_id)
             for location in locations:
                 location_id = location['name'].split('/')[-1]
                 location_title = location.get('title', 'Unknown')
-                performance_data = fetch_performance_data(access_token, location_id, start_date, end_date)
+                store_code = location.get('storeCode', 'unknown_store')
+                is_verified = location.get('metadata', {}).get('hasVoiceOfMerchant', False)
+                performance_data = fetch_performance_data(access_token, location_id, location_title, store_code, is_verified)
                 if performance_data:
-                    if insert_metrics_to_bigquery(account_id, location_id, location_title, performance_data):
+                    if insert_metrics_to_bigquery(account_id, location_id, location_title, store_code, is_verified, performance_data):
                         processed_locations += 1
-                        logger.info(f"Successfully processed location {location_id} for account {account_id}")
+                        logger.info(f"Successfully processed location {location_id} ({location_title}) for account {account_id}")
                     else:
-                        logger.warning(f"Failed to insert data for location {location_id}")
+                        failed_locations.append({
+                            'account_id': account_id,
+                            'location_id': location_id,
+                            'location_title': location_title,
+                            'store_code': store_code,
+                            'is_verified': is_verified,
+                            'error': 'Insert failed'
+                        })
+                        logger.warning(f"Failed to insert data for location {location_id} ({location_title})")
+                else:
+                    failed_locations.append({
+                        'account_id': account_id,
+                        'location_id': location_id,
+                        'location_title': location_title,
+                        'store_code': store_code,
+                        'is_verified': is_verified,
+                        'error': 'No performance data'
+                    })
+                    logger.warning(f"No performance data for location {location_id} ({location_title}, store_code: {store_code}, is_verified: {is_verified})")
         
-        return {
-            'status': 'success',
-            'message': f'Processed {processed_locations} locations for {len(accounts)} accounts from {start_date} to {end_date}'
-        }, 200
+        response = {
+            'status': 'success' if processed_locations > 0 else 'partial_success',
+            'message': f'Processed {processed_locations} locations for {len(accounts)} accounts from {start_date} to {end_date}',
+            'failed_locations': failed_locations
+        }
+        logger.info(f"Response: {json.dumps(response, indent=2)}")
+        return response, 200 if processed_locations > 0 else 500
     except Exception as e:
         logger.error(f"Function error: {str(e)}")
-        return {'status': 'error', 'message': str(e)}, 500
+        return {'status': 'error', 'message': str(e), 'failed_locations': []}, 500
