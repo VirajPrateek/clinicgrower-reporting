@@ -7,9 +7,8 @@ import os
 from urllib.parse import urlencode
 from datetime import datetime, date, timedelta
 from google.api_core.exceptions import NotFound
-from time import sleep
 
-# Configure logging for Cloud Logging
+# Configure logging for Cloud Logging (minimal)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -21,7 +20,7 @@ ACCOUNTS_URL = os.environ.get('ACCOUNTS_URL', 'https://mybusinessbusinessinforma
 LOCATIONS_URL_BASE = os.environ.get('LOCATIONS_URL_BASE', 'https://mybusinessbusinessinformation.googleapis.com/v1')
 PERFORMANCE_URL_BASE = os.environ.get('PERFORMANCE_URL_BASE', 'https://businessprofileperformance.googleapis.com/v1')
 
-# All available metrics
+# Metrics from fetchMultiDailyMetricsTimeSeries
 METRICS = [
     'BUSINESS_IMPRESSIONS_DESKTOP_MAPS',
     'BUSINESS_IMPRESSIONS_DESKTOP_SEARCH',
@@ -53,7 +52,6 @@ def get_access_token():
         client_id = get_secret('gmb-client-id')
         client_secret = get_secret('gmb-client-secret')
         refresh_token = get_secret('gmb-refresh-token')
-        
         data = {
             'client_id': client_id,
             'client_secret': client_secret,
@@ -64,9 +62,7 @@ def get_access_token():
         if response.status_code != 200:
             logger.error(f"Token refresh failed: {response.status_code} {response.text}")
             response.raise_for_status()
-        access_token = response.json()['access_token']
-        logger.info("Successfully refreshed access token")
-        return access_token
+        return response.json()['access_token']
     except requests.HTTPError as e:
         logger.error(f"HTTP error refreshing access token: {e}")
         raise
@@ -100,25 +96,20 @@ def create_bigquery_table():
         )
         try:
             client.get_table(table_ref)
-            logger.info(f"Table {DATASET_ID}.{TABLE_ID} already exists")
         except NotFound:
             client.create_table(table)
-            logger.info(f"Created date-partitioned table {DATASET_ID}.{TABLE_ID}")
     except Exception as e:
         logger.error(f"Error creating BigQuery table: {e}")
         raise
 
-def list_accounts(access_token):
+def list_accounts(access_token, target_account_ids=None):
     """List all GMB accounts with pagination."""
     accounts = []
     page_token = None
     try:
-        headers = {
-            'Authorization': f'Bearer {access_token}',
-            'Content-Type': 'application/json'
-        }
+        headers = {'Authorization': f'Bearer {access_token}'}
         while True:
-            params = {'pageSize': 100}  # Max pageSize
+            params = {'pageSize': 100}
             if page_token:
                 params['pageToken'] = page_token
             response = requests.get(ACCOUNTS_URL, headers=headers, params=params)
@@ -127,16 +118,13 @@ def list_accounts(access_token):
                 response.raise_for_status()
             data = response.json()
             new_accounts = data.get('accounts', [])
+            if target_account_ids:
+                new_accounts = [a for a in new_accounts if a['name'].split('/')[-1] in target_account_ids]
             accounts.extend(new_accounts)
-            account_ids = [account['name'].split('/')[-1] for account in new_accounts]
-            logger.info(f"Fetched {len(new_accounts)} accounts in page: {account_ids}")
             page_token = data.get('nextPageToken')
             if not page_token:
                 break
-        if not accounts:
-            logger.warning("No accounts returned")
-        else:
-            logger.info(f"Found total {len(accounts)} accounts: {[a['name'].split('/')[-1] for a in accounts]}")
+        logger.info(f"Found {len(accounts)} accounts")
         return accounts
     except requests.HTTPError as e:
         logger.error(f"HTTP error listing accounts: {e}")
@@ -150,15 +138,9 @@ def list_locations(access_token, account_id):
     locations = []
     page_token = None
     try:
-        headers = {
-            'Authorization': f'Bearer {access_token}',
-            'Content-Type': 'application/json'
-        }
+        headers = {'Authorization': f'Bearer {access_token}'}
         while True:
-            params = {
-                'readMask': 'name,storeCode,title,metadata',
-                'pageSize': 100  # Max pageSize
-            }
+            params = {'readMask': 'name,storeCode,title,metadata', 'pageSize': 100}
             if page_token:
                 params['pageToken'] = page_token
             locations_url = f"{LOCATIONS_URL_BASE}/accounts/{account_id}/locations"
@@ -169,22 +151,10 @@ def list_locations(access_token, account_id):
             data = response.json()
             new_locations = data.get('locations', [])
             locations.extend(new_locations)
-            location_info = [
-                {
-                    'location_id': loc['name'].split('/')[-1],
-                    'title': loc.get('title', 'Unknown'),
-                    'store_code': loc.get('storeCode', 'Unknown'),
-                    'is_verified': loc.get('metadata', {}).get('hasVoiceOfMerchant', False)
-                } for loc in new_locations
-            ]
-            logger.info(f"Fetched {len(new_locations)} locations for account {account_id}: {json.dumps(location_info, indent=2)}")
             page_token = data.get('nextPageToken')
             if not page_token:
                 break
-        if not locations:
-            logger.warning(f"No locations returned for account {account_id}")
-        else:
-            logger.info(f"Found total {len(locations)} locations for account {account_id}")
+        logger.info(f"Found {len(locations)} locations for account {account_id}")
         return locations
     except requests.HTTPError as e:
         logger.error(f"HTTP error listing locations for account {account_id}: {e}")
@@ -193,15 +163,10 @@ def list_locations(access_token, account_id):
         logger.error(f"Error listing locations for account {account_id}: {e}")
         return []
 
-def fetch_performance_data(access_token, location_id, location_title, store_code, is_verified, max_retries=3, delay=2):
+def fetch_performance_data(access_token, location_id, location_title, store_code, is_verified, start_date, end_date, max_retries=3, delay=2):
     """Fetch performance data for a specific location and date range with retries."""
     performance_url = f"{PERFORMANCE_URL_BASE}/locations/{location_id}:fetchMultiDailyMetricsTimeSeries"
-    headers = {
-        'Authorization': f'Bearer {access_token}',
-        'Content-Type': 'application/json'
-    }
-    start_date = date(2025, 4, 1)
-    end_date = date(2025, 4, 30)
+    headers = {'Authorization': f'Bearer {access_token}'}
     params = {
         'dailyRange.start_date.year': start_date.year,
         'dailyRange.start_date.month': start_date.month,
@@ -219,49 +184,65 @@ def fetch_performance_data(access_token, location_id, location_title, store_code
         try:
             response = requests.get(url, headers=headers)
             if response.status_code != 200:
-                logger.error(f"Performance request failed for location {location_id} ({location_title}, store_code: {store_code}, is_verified: {is_verified}): {response.status_code} {response.text}")
+                logger.error(f"Failed for location {location_id} (title: {location_title}, store_code: {store_code}, is_verified: {is_verified}): {response.status_code} {response.text}")
                 response.raise_for_status()
-            data = response.json()
-            logger.info(f"Retrieved performance data for location {location_id} ({location_title})")
-            return data
+            return response.json()
         except requests.HTTPError as e:
             if response.status_code == 403:
-                logger.error(f"Permission denied for location {location_id} ({location_title}, store_code: {store_code}, is_verified: {is_verified}): {response.text}")
+                logger.error(f"Permission denied for location {location_id} (title: {location_title}, store_code: {store_code}, is_verified: {is_verified}): {response.text}")
                 return None
             if response.status_code == 429:
-                logger.warning(f"Rate limit exceeded for location {location_id}. Retry {attempt+1}/{max_retries}")
                 if attempt == max_retries - 1:
-                    logger.error(f"Max retries reached for location {location_id}: {e}")
+                    logger.error(f"Max retries reached for location {location_id}")
                     return None
                 sleep(delay * (2 ** attempt))
             else:
                 logger.error(f"HTTP error for location {location_id}: {e}")
                 return None
         except Exception as e:
-            logger.error(f"Error fetching performance data for location {location_id} ({location_title}): {e}")
+            logger.error(f"Error fetching data for location {location_id}: {e}")
             return None
     return None
 
-def insert_metrics_to_bigquery(account_id, location_id, location_title, store_code, is_verified, data):
-    """Insert pivoted metrics into BigQuery."""
+def insert_metrics_to_bigquery(account_id, location_id, location_title, store_code, is_verified, data, start_date, end_date):
+    """Insert pivoted metrics into BigQuery, checking for duplicates."""
     try:
         client = bigquery.Client(project=PROJECT_ID)
         table_ref = client.dataset(DATASET_ID).table(TABLE_ID)
+        
+        # Check for existing rows
+        query = f"""
+            SELECT DISTINCT location_id, date
+            FROM `{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}`
+            WHERE location_id = @location_id
+              AND date BETWEEN @start_date AND @end_date
+        """
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("location_id", "STRING", location_id),
+                bigquery.ScalarQueryParameter("start_date", "DATE", start_date),
+                bigquery.ScalarQueryParameter("end_date", "DATE", end_date)
+            ]
+        )
+        existing_rows = {(row.location_id, str(row.date)) for row in client.query(query, job_config=job_config)}
+        
         rows_to_insert = []
         load_timestamp = datetime.utcnow()
-        
         metrics_by_date = {}
-        for metric_series in data.get('multiDailyMetricTimeSeries', []):
-            for daily_metric in metric_series.get('dailyMetricTimeSeries', []):
-                metric_name = daily_metric.get('dailyMetric')
-                time_series = daily_metric.get('timeSeries', {}).get('datedValues', [])
-                for dated_value in time_series:
-                    date_str = dated_value.get('date', {})
-                    date_key = f"{date_str.get('year', 2025)}-{date_str.get('month', 4):02d}-{date_str.get('day', 1):02d}"
-                    value = int(dated_value.get('value', 0))
-                    if date_key not in metrics_by_date:
-                        metrics_by_date[date_key] = {metric: 0 for metric in METRICS}
-                    metrics_by_date[date_key][metric_name] = value
+        if data:
+            for metric_series in data.get('multiDailyMetricTimeSeries', []):
+                for daily_metric in metric_series.get('dailyMetricTimeSeries', []):
+                    metric_name = daily_metric.get('dailyMetric')
+                    time_series = daily_metric.get('timeSeries', {}).get('datedValues', [])
+                    for dated_value in time_series:
+                        date_str = dated_value.get('date', {})
+                        date_key = f"{date_str.get('year', 2025)}-{date_str.get('month', 5):02d}-{date_str.get('day', 1):02d}"
+                        if (location_id, date_key) in existing_rows:
+                            continue
+                        value = int(dated_value.get('value', 0))
+                        if date_key not in metrics_by_date:
+                            metrics_by_date[date_key] = {metric: 0 for metric in METRICS}
+                        metrics_by_date[date_key][metric_name] = value
         
         for date_key, metric_values in metrics_by_date.items():
             row = {
@@ -281,14 +262,12 @@ def insert_metrics_to_bigquery(account_id, location_id, location_title, store_co
         if rows_to_insert:
             errors = client.insert_rows_json(table_ref, rows_to_insert)
             if errors:
-                logger.error(f"Errors inserting rows to BigQuery for location {location_id} ({location_title}): {errors}")
+                logger.error(f"Insert errors for location {location_id} (title: {location_title}): {errors}")
                 return False
-            logger.info(f"Inserted {len(rows_to_insert)} rows for location {location_id} ({location_title})")
             return True
-        logger.warning(f"No data to insert for location {location_id} ({location_title})")
         return False
     except Exception as e:
-        logger.error(f"Error inserting data to BigQuery for location {location_id} ({location_title}): {e}")
+        logger.error(f"Error inserting data for location {location_id}: {e}")
         return False
 
 @functions_framework.http
@@ -297,14 +276,34 @@ def gmb_fetch_performance(request):
     try:
         create_bigquery_table()
         request_json = request.get_json(silent=True) or {}
-        start_date = date(2025, 4, 1)
-        end_date = date(2025, 4, 30)
+        
+        # Determine date range based on backfill flag
+        backfill = request_json.get('backfill', False)
+        if backfill:
+            try:
+                start_date = datetime.strptime(request_json['start_date'], '%Y-%m-%d').date()
+                end_date = datetime.strptime(request_json['end_date'], '%Y-%m-%d').date()
+                if start_date > end_date:
+                    raise ValueError("start_date must be before or equal to end_date")
+            except (KeyError, ValueError) as e:
+                logger.error(f"Invalid backfill parameters: {e}")
+                return {'status': 'error', 'message': f'Invalid backfill parameters: {e}', 'failed_locations': []}, 400
+        else:
+            end_date = (datetime.utcnow() - timedelta(days=1)).date()
+            start_date = end_date - timedelta(days=3)  # T-4 to T-1
+        logger.info(f"Starting {'backfill' if backfill else 'daily'} run for {start_date} to {end_date}")
+        
+        # Get target account IDs if specified
+        target_account_ids = request_json.get('target_account_ids', None)
         
         access_token = get_access_token()
-        accounts = list_accounts(access_token)
-        if not accounts:
+        all_accounts = list_accounts(access_token, target_account_ids)
+        if not all_accounts:
             logger.error("No accounts found")
             return {'status': 'error', 'message': 'No accounts found', 'failed_locations': []}, 500
+        
+        # Process all accounts
+        accounts = all_accounts
         
         processed_locations = 0
         failed_locations = []
@@ -316,11 +315,10 @@ def gmb_fetch_performance(request):
                 location_title = location.get('title', 'Unknown')
                 store_code = location.get('storeCode', 'unknown_store')
                 is_verified = location.get('metadata', {}).get('hasVoiceOfMerchant', False)
-                performance_data = fetch_performance_data(access_token, location_id, location_title, store_code, is_verified)
+                performance_data = fetch_performance_data(access_token, location_id, location_title, store_code, is_verified, start_date, end_date)
                 if performance_data:
-                    if insert_metrics_to_bigquery(account_id, location_id, location_title, store_code, is_verified, performance_data):
+                    if insert_metrics_to_bigquery(account_id, location_id, location_title, store_code, is_verified, performance_data, start_date, end_date):
                         processed_locations += 1
-                        logger.info(f"Successfully processed location {location_id} ({location_title}) for account {account_id}")
                     else:
                         failed_locations.append({
                             'account_id': account_id,
@@ -330,7 +328,6 @@ def gmb_fetch_performance(request):
                             'is_verified': is_verified,
                             'error': 'Insert failed'
                         })
-                        logger.warning(f"Failed to insert data for location {location_id} ({location_title})")
                 else:
                     failed_locations.append({
                         'account_id': account_id,
@@ -340,14 +337,13 @@ def gmb_fetch_performance(request):
                         'is_verified': is_verified,
                         'error': 'No performance data'
                     })
-                    logger.warning(f"No performance data for location {location_id} ({location_title}, store_code: {store_code}, is_verified: {is_verified})")
         
         response = {
             'status': 'success' if processed_locations > 0 else 'partial_success',
             'message': f'Processed {processed_locations} locations for {len(accounts)} accounts from {start_date} to {end_date}',
             'failed_locations': failed_locations
         }
-        logger.info(f"Response: {json.dumps(response, indent=2)}")
+        logger.info(f"Response: {json.dumps(response)}")
         return response, 200 if processed_locations > 0 else 500
     except Exception as e:
         logger.error(f"Function error: {str(e)}")
