@@ -29,27 +29,76 @@ This document defines the key-value mappings used in the `gahl-to-ga4-custom-cod
 
 ---
 
+---
+
 ### GMB Metrics Pipeline (`gmb-pipeline.py`)
 
-This script automates the process of pulling daily performance metrics from Google Business Profile (formerly GMB) and writing them to a partitioned BigQuery table.
+This script automates the ingestion of daily metrics from Google Business Profile (formerly Google My Business) into BigQuery using a scheduled Cloud Function.
 
-#### 🔄 Daily Scheduling
-- This function is deployed as an HTTP-triggered Cloud Function.
-- It is triggered **daily at 4 AM UTC** using **Cloud Scheduler** with an HTTP POST request.
+---
 
-#### 🧾 Metrics Collected
-The script collects daily metrics like:
-- Impressions (search/maps, mobile/desktop)
-- Call clicks
-- Website clicks
-- Direction requests
-- Conversations
-- Bookings, food orders, and menu clicks
+#### 🔧 Overview
 
-#### 🔐 Authentication
-Authentication is handled securely using **OAuth 2.0 refresh tokens** stored in **Google Secret Manager**. The function:
-- Retrieves `client_id`, `client_secret`, and `refresh_token` from Secret Manager
-- Exchanges them for an access token before hitting the Business Profile API
+- Pulls performance data via `fetchMultiDailyMetricsTimeSeries` from the [Business Profile Performance API](https://developers.google.com/my-business/reference/businessinformation/rest)
+- Transforms and pivots the metrics
+- Inserts them into a partitioned BigQuery table
+- Supports both **daily incremental loads** and **historical backfills**
+
+---
+
+#### ⚙️ Configuration Prerequisites
+
+##### 🔐 1. **Secrets to Set in Secret Manager**
+
+Create the following secrets in **Secret Manager** under your GCP project (`clinicgrower-reporting` by default):
+
+| Secret ID             | Description                                      |
+|-----------------------|--------------------------------------------------|
+| `gmb-client-id`       | OAuth 2.0 Client ID (from Google Cloud Console) |
+| `gmb-client-secret`   | OAuth 2.0 Client Secret                          |
+| `gmb-refresh-token`   | Refresh token generated after user consent      |
+
+> ✅ **Tip:** You can generate the refresh token using a one-time OAuth flow (see [OAuth Playground](https://developers.google.com/oauthplayground)).
+
+---
+
+##### 📦 2. **APIs to Enable in Google Cloud Console**
+
+Make sure these APIs are enabled:
+
+- [Secret Manager API](https://console.cloud.google.com/apis/library/secretmanager.googleapis.com)
+- [BigQuery API](https://console.cloud.google.com/apis/library/bigquery.googleapis.com)
+- [Cloud Functions API](https://console.cloud.google.com/apis/library/cloudfunctions.googleapis.com)
+- [Cloud Scheduler API](https://console.cloud.google.com/apis/library/cloudscheduler.googleapis.com)
+- [Cloud Logging API](https://console.cloud.google.com/apis/library/logging.googleapis.com)
+
+> ⚠️ **Also required:**  
+> - `IAM` roles to access Secrets (`Secret Manager Secret Accessor`)
+> - `BigQuery Data Editor` or higher on the target dataset
+
+---
+
+##### 🔑 3. **How to Get Access to GMB (Business Profile) APIs**
+
+1. **Apply for access** at the [Google Business Profile APIs access request form](https://developers.google.com/my-business/content/prereqs)
+2. Google will review your intended use case and may take several days to approve
+3. Once approved, you’ll be able to make requests to:
+   - `https://mybusinessbusinessinformation.googleapis.com/`
+   - `https://businessprofileperformance.googleapis.com/`
+
+> 📝 Note: Access is granted at the account-level (e.g., a brand's account managing multiple locations).
+
+---
+
+#### 🔁 Daily Schedule
+
+- The Cloud Function is triggered **daily at 4:00 AM UTC** using **Cloud Scheduler**
+- Scheduler sends an HTTP POST request to the function with no body (default: past 3-day window)
+
+Example payload for daily run:
+
+```json
+{}
 
 #### 📥 Backfill Support
 To backfill historical data, send a POST request to the Cloud Function with the following payload:
