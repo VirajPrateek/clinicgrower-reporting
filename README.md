@@ -1,5 +1,8 @@
 # clinicgrower-reporting
-clinicgrower-reporting project is a part of a larger data pipelining and visualization project including but not limited to GA4, Meta Ads, Google ads, GMB, GHL etc
+
+clinicgrower-reporting project is a part of a larger data pipelining and visualization project including but not limited to GA4, Meta Ads, Google Ads, GMB, GHL, etc.
+
+---
 
 ### GHL to GA4 Mapping Documentation
 
@@ -7,9 +10,9 @@ This document defines the key-value mappings used in the `gahl-to-ga4-custom-cod
 
 | **Key (JSON Field)** | **Value (Variable)** | **Example** |
 |----------------------|----------------------|-------------|
-| `measurement_id`     | *Get from GA4*   | `G-XXXXXXXXXX` |
-| `mp_secret`          | *Get from GA4*   | `mn235nsd9034nfsd` |
-| `event_name`         | *Use as per funnel*| `subscribe_form_meta_ghl` |
+| `measurement_id`     | *Get from GA4*       | `G-XXXXXXXXXX` |
+| `mp_secret`          | *Get from GA4*       | `mn235nsd9034nfsd` |
+| `event_name`         | *Use as per funnel*  | `subscribe_form_meta_ghl` |
 | `appointment_id`     | `{{appointment.id}}` | – |
 | `utm_source`         | `{{contact.lastAttributionSource.utmSource}}` | – |
 | `utm_medium`         | `{{contact.lastAttributionSource.utmMedium}}` | – |
@@ -28,13 +31,12 @@ This document defines the key-value mappings used in the `gahl-to-ga4-custom-cod
 > 🔧 **Note:** Make sure `measurement_id`, `mp_secret`, and `event_name` are configured correctly based on your use case.
 
 ---
----
-
 
 ### GMB Metrics Pipeline (`gmb-pipeline.py`)
 
 This script automates the ingestion of daily metrics from Google Business Profile (formerly Google My Business) into BigQuery using a scheduled Cloud Function.
 
+---
 
 #### 🔧 Overview
 
@@ -43,10 +45,11 @@ This script automates the ingestion of daily metrics from Google Business Profil
 - Inserts them into a partitioned BigQuery table
 - Supports both **daily incremental loads** and **historical backfills**
 
+---
 
 #### ⚙️ Configuration Prerequisites
 
-##### 🔐 1. **Secrets to Set in Secret Manager**
+##### 🔐 1. Secrets to Set in Secret Manager
 
 Create the following secrets in **Secret Manager** under your GCP project (`clinicgrower-reporting` by default):
 
@@ -58,8 +61,9 @@ Create the following secrets in **Secret Manager** under your GCP project (`clin
 
 > ✅ **Tip:** You can generate the refresh token using a one-time OAuth flow (see [OAuth Playground](https://developers.google.com/oauthplayground)).
 
+---
 
-##### 📦 2. **APIs to Enable in Google Cloud Console**
+##### 📦 2. APIs to Enable in Google Cloud Console
 
 Make sure these APIs are enabled:
 
@@ -70,11 +74,12 @@ Make sure these APIs are enabled:
 - [Cloud Logging API](https://console.cloud.google.com/apis/library/logging.googleapis.com)
 
 > ⚠️ **Also required:**  
-> - `IAM` roles to access Secrets (`Secret Manager Secret Accessor`)
+> - `IAM` roles to access Secrets (`Secret Manager Secret Accessor`)  
 > - `BigQuery Data Editor` or higher on the target dataset
 
+---
 
-##### 🔑 3. **How to Get Access to GMB (Business Profile) APIs**
+##### 🔑 3. How to Get Access to GMB (Business Profile) APIs
 
 1. **Apply for access** at the [Google Business Profile APIs access request form](https://developers.google.com/my-business/content/prereqs)
 2. Google will review your intended use case and may take several days to approve
@@ -82,8 +87,9 @@ Make sure these APIs are enabled:
    - `https://mybusinessbusinessinformation.googleapis.com/`
    - `https://businessprofileperformance.googleapis.com/`
 
-> 📝 Note: Access is granted at the account-level (e.g., a brand's account managing multiple locations).
+> 📝 **Note:** Access is granted at the account level (e.g., a brand's account managing multiple locations).
 
+---
 
 ##### 🔁 4. Daily Schedule
 
@@ -94,12 +100,18 @@ Example payload for daily run:
 
 ```json
 {}
+```
 
-##### 📥 5. Backfill Support
-To backfill historical data, send a POST request to the Cloud Function with the following payload:
+---
+
+##### 🔁 5. Backfill Support
+
+- To backfill historical data, send a POST request to the Cloud Function with the following payload:
+
 ```json
 {
-  "backfill": true,
-  "start_date": "2024-06-01",
-  "end_date": "2024-06-30"
+    "backfill": true,
+    "start_date": "YYYY-MM-DD",
+    "end_date": "YYYY-MM-DD"
 }
+```
