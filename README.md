@@ -28,14 +28,13 @@ This document defines the key-value mappings used in the `gahl-to-ga4-custom-cod
 > 🔧 **Note:** Make sure `measurement_id`, `mp_secret`, and `event_name` are configured correctly based on your use case.
 
 ---
-
 ---
+
 
 ### GMB Metrics Pipeline (`gmb-pipeline.py`)
 
 This script automates the ingestion of daily metrics from Google Business Profile (formerly Google My Business) into BigQuery using a scheduled Cloud Function.
 
----
 
 #### 🔧 Overview
 
@@ -44,7 +43,6 @@ This script automates the ingestion of daily metrics from Google Business Profil
 - Inserts them into a partitioned BigQuery table
 - Supports both **daily incremental loads** and **historical backfills**
 
----
 
 #### ⚙️ Configuration Prerequisites
 
@@ -60,7 +58,6 @@ Create the following secrets in **Secret Manager** under your GCP project (`clin
 
 > ✅ **Tip:** You can generate the refresh token using a one-time OAuth flow (see [OAuth Playground](https://developers.google.com/oauthplayground)).
 
----
 
 ##### 📦 2. **APIs to Enable in Google Cloud Console**
 
@@ -76,7 +73,6 @@ Make sure these APIs are enabled:
 > - `IAM` roles to access Secrets (`Secret Manager Secret Accessor`)
 > - `BigQuery Data Editor` or higher on the target dataset
 
----
 
 ##### 🔑 3. **How to Get Access to GMB (Business Profile) APIs**
 
@@ -88,9 +84,8 @@ Make sure these APIs are enabled:
 
 > 📝 Note: Access is granted at the account-level (e.g., a brand's account managing multiple locations).
 
----
 
-#### 🔁 Daily Schedule
+##### 🔁 4. Daily Schedule
 
 - The Cloud Function is triggered **daily at 4:00 AM UTC** using **Cloud Scheduler**
 - Scheduler sends an HTTP POST request to the function with no body (default: past 3-day window)
@@ -100,7 +95,7 @@ Example payload for daily run:
 ```json
 {}
 
-#### 📥 Backfill Support
+##### 📥 5. Backfill Support
 To backfill historical data, send a POST request to the Cloud Function with the following payload:
 ```json
 {
