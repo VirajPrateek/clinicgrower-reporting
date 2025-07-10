@@ -1,3 +1,6 @@
+#standardSQL
+CREATE OR REPLACE VIEW
+  `clinicgrower-reporting.dashboard_views.budget_tracker_datewise_view` AS
 WITH
   MetaSpend AS (
     SELECT
