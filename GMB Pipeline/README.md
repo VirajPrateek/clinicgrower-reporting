@@ -62,7 +62,7 @@ Enable these APIs:
 ## 🔁 Daily Schedule
 
 * The Cloud Function is triggered daily at **4:00 AM UTC** via **Cloud Scheduler**
-* It fetches data for the previous 3 days
+* It fetches data for the previous 7 days
 
 **Example payload for daily run:**
 
