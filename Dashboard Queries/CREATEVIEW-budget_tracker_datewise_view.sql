@@ -1,7 +1,7 @@
 WITH
   MetaSpend AS (
     SELECT
-      CONCAT('CG', SAFE_CAST(REGEXP_EXTRACT(campaign_name, r'^CG0*(\d+)') AS INT64)) AS cg_id,
+      REGEXP_EXTRACT(campaign_name, r'^CG0*\d+') AS cg_id,
       _TABLE_SUFFIX AS debug_table_suffix,
       DATE_TRUNC(date_start, MONTH) AS report_month,
       date_start AS date_spend,
