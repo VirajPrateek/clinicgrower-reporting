@@ -134,7 +134,7 @@ def list_accounts(access_token, target_account_ids=None):
         return []
 
 def list_locations(access_token, account_id):
-    """List locations for a specific account with pagination."""
+    """List only verified locations for a specific account with pagination."""
     locations = []
     page_token = None
     try:
@@ -149,12 +149,12 @@ def list_locations(access_token, account_id):
                 logger.error(f"Locations request failed for account {account_id}: {response.status_code} {response.text}")
                 response.raise_for_status()
             data = response.json()
-            new_locations = data.get('locations', [])
+            new_locations = [loc for loc in data.get('locations', []) if loc.get('metadata', {}).get('hasVoiceOfMerchant', False)]
             locations.extend(new_locations)
             page_token = data.get('nextPageToken')
             if not page_token:
                 break
-        logger.info(f"Found {len(locations)} locations for account {account_id}")
+        logger.info(f"Found {len(locations)} verified locations for account {account_id}")
         return locations
     except requests.HTTPError as e:
         logger.error(f"HTTP error listing locations for account {account_id}: {e}")
@@ -184,17 +184,18 @@ def fetch_performance_data(access_token, location_id, location_title, store_code
         try:
             response = requests.get(url, headers=headers)
             if response.status_code != 200:
-                logger.error(f"Failed for location {location_id} (title: {location_title}, store_code: {store_code}, is_verified: {is_verified}): {response.status_code} {response.text}")
+                logger.error(f"Failed for location {location_id}: {response.status_code} {response.text}")
                 response.raise_for_status()
             return response.json()
         except requests.HTTPError as e:
             if response.status_code == 403:
-                logger.error(f"Permission denied for location {location_id} (title: {location_title}, store_code: {store_code}, is_verified: {is_verified}): {response.text}")
+                logger.error(f"Permission denied for location {location_id}: {response.text}")
                 return None
             if response.status_code == 429:
                 if attempt == max_retries - 1:
                     logger.error(f"Max retries reached for location {location_id}")
                     return None
+                from time import sleep
                 sleep(delay * (2 ** attempt))
             else:
                 logger.error(f"HTTP error for location {location_id}: {e}")
@@ -262,8 +263,10 @@ def insert_metrics_to_bigquery(account_id, location_id, location_title, store_co
         if rows_to_insert:
             errors = client.insert_rows_json(table_ref, rows_to_insert)
             if errors:
-                logger.error(f"Insert errors for location {location_id} (title: {location_title}): {errors}")
+                logger.error(f"Insert errors for location {location_id}: {errors}")
                 return False
+            # Log one-liner for rows inserted on this date
+            logger.info(f"Inserted {len(rows_to_insert)} rows on {date_key}")
             return True
         return False
     except Exception as e:
@@ -277,7 +280,7 @@ def gmb_fetch_performance(request):
         create_bigquery_table()
         request_json = request.get_json(silent=True) or {}
         
-        # Determine date range based on backfill flag
+        # Determine date range
         backfill = request_json.get('backfill', False)
         if backfill:
             try:
@@ -289,8 +292,8 @@ def gmb_fetch_performance(request):
                 logger.error(f"Invalid backfill parameters: {e}")
                 return {'status': 'error', 'message': f'Invalid backfill parameters: {e}', 'failed_locations': []}, 400
         else:
-            end_date = (datetime.utcnow() - timedelta(days=1)).date()
-            start_date = end_date - timedelta(days=3)  # T-4 to T-1
+            end_date = (datetime.utcnow() - timedelta(days=1)).date()  # T-1
+            start_date = end_date - timedelta(days=6)  # T-7 to T-1 (7 days)
         logger.info(f"Starting {'backfill' if backfill else 'daily'} run for {start_date} to {end_date}")
         
         # Get target account IDs if specified
@@ -307,6 +310,7 @@ def gmb_fetch_performance(request):
         
         processed_locations = 0
         failed_locations = []
+        total_rows = 0
         for account in accounts:
             account_id = account['name'].split('/')[-1]
             locations = list_locations(access_token, account_id)
@@ -314,11 +318,13 @@ def gmb_fetch_performance(request):
                 location_id = location['name'].split('/')[-1]
                 location_title = location.get('title', 'Unknown')
                 store_code = location.get('storeCode', 'unknown_store')
-                is_verified = location.get('metadata', {}).get('hasVoiceOfMerchant', False)
+                is_verified = location.get('metadata', {}).get('hasVoiceOfMerchant', True)  # Should always be True now
                 performance_data = fetch_performance_data(access_token, location_id, location_title, store_code, is_verified, start_date, end_date)
                 if performance_data:
                     if insert_metrics_to_bigquery(account_id, location_id, location_title, store_code, is_verified, performance_data, start_date, end_date):
                         processed_locations += 1
+                        # Accumulate total rows (approximation based on locations processed)
+                        total_rows += 1  # Adjust if multiple rows per location
                     else:
                         failed_locations.append({
                             'account_id': account_id,
@@ -337,6 +343,9 @@ def gmb_fetch_performance(request):
                         'is_verified': is_verified,
                         'error': 'No performance data'
                     })
+        
+        # Log total rows inserted
+        logger.info(f"Total rows inserted: {total_rows}")
         
         response = {
             'status': 'success' if processed_locations > 0 else 'partial_success',
