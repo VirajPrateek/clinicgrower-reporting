@@ -1,9 +1,9 @@
-CREATE OR REPLACE VIEW `clinicgrower-reporting.dashboard_views.combined_ga4_metaads_with_individual_metrics_view` AS
+CREATE OR REPLACE VIEW `dashboard_views.combined_ga4_metaads_with_individual_metrics_view` AS
 WITH StreamMapping AS (
   SELECT
     cg_id AS cg_id,
     MAX(ga4_property_id) AS property_id
-  FROM `clinicgrower-reporting.dashboard_views.monday_board_mapping`
+  FROM `dashboard_views.monday_board_mapping_materialized`
   WHERE cg_id IS NOT NULL
   GROUP BY cg_id
 ),
@@ -27,7 +27,7 @@ AllDates AS (
   SELECT DISTINCT date_start AS report_date, REGEXP_EXTRACT(campaign_name, r'^(CG0*\d+)') AS cg_id
   FROM `clinicgrower-reporting.meta_ads_new.*`
   WHERE _TABLE_SUFFIX LIKE '%_ads_insights'
-    AND REGEXP_CONTAINS(campaign_name, r'^CG0*313\b')
+    AND REGEXP_CONTAINS(campaign_name, r'^CG0*\d+')
     AND date_start IS NOT NULL
 ),
 GA4LeadData AS (
@@ -102,7 +102,7 @@ AdsDailySummary AS (
     MAX(account_name) AS account_name
   FROM `clinicgrower-reporting.meta_ads_new.*`
   WHERE _TABLE_SUFFIX LIKE '%_ads_insights'
-    AND REGEXP_CONTAINS(campaign_name, r'^CG0*313\b')
+    AND REGEXP_CONTAINS(campaign_name, r'^CG0*\d+')
     AND date_start IS NOT NULL
   GROUP BY cg_id, date_spend
 ),
@@ -179,11 +179,75 @@ ClientLevel AS (
     ON dates.cg_id = smap.cg_id
   LEFT JOIN AccountMapping amap
     ON dates.cg_id = amap.cg_id
-  WHERE dates.cg_id = 'CG313'
+),
+ClientLevelFiltered AS (
+  SELECT
+    property_id,
+    cg_id AS cgid,
+    account_name,
+    report_month,
+    report_date,
+    date_spend,
+    subscribe_survey_meta_gtm,
+    subscribe_form_meta_gtm,
+    subscribe_form_google_gtm,
+    subscribe_survey_google_gtm,
+    subscribe_call_meta_gtm,
+    subscribe_call_google_gtm,
+    subscribe_call_citations_gtm,
+    subscribe_call_website_gtm,
+    subscribe_call_press_gtm,
+    subscribe_call_gbp_gtm,
+    subscribe_call_main_gtm,
+    subscribe_call_seo_gtm,
+    subscribe_call_youtube_gtm,
+    subscribe_fb_messenger_gtm,
+    subscribe_ig_messenger_gtm,
+    subscribe_appt_request_gtm,
+    subscribe_form_website_gtm,
+    subscribe_chat_website_gtm,
+    subscribe_chat_fbfunnel_gtm,
+    subscribe_chat_googlefunnel_gtm,
+    pageview_funnel_gtm,
+    subscribe_survey_meta_ghl,
+    subscribe_form_meta_ghl,
+    subscribe_form_google_ghl,
+    subscribe_survey_google_ghl,
+    subscribe_call_meta_ghl,
+    subscribe_call_google_ghl,
+    subscribe_call_citations_ghl,
+    subscribe_call_website_ghl,
+    subscribe_call_press_ghl,
+    subscribe_call_gbp_ghl,
+    subscribe_call_main_ghl,
+    subscribe_call_seo_ghl,
+    subscribe_fb_messenger_ghl,
+    subscribe_ig_messenger_ghl,
+    subscribe_appt_booked_ghl,
+    subscribe_form_website_ghl,
+    subscribe_chat_website_ghl,
+    subscribe_chat_fbfunnel_ghl,
+    subscribe_chat_googlefunnel_ghl,
+    appt_cancelled_ghl,
+    appt_noshow_ghl,
+    appt_show_ghl,
+    total_events,
+    total_spend,
+    total_impressions,
+    total_clicks,
+    avg_cpc,
+    avg_cpm,
+    avg_ctr,
+    total_reach,
+    total_unique_clicks,
+    level,
+    debug_row_count
+  FROM ClientLevel
+  WHERE report_date IS NOT NULL
 )
 SELECT
   property_id,
-  cg_id AS cgid,
+  cgid,
   account_name,
   report_month,
   report_date,
@@ -242,6 +306,5 @@ SELECT
   IFNULL(total_unique_clicks, 0) AS total_unique_clicks,
   level,
   debug_row_count
-FROM ClientLevel
-WHERE report_date IS NOT NULL
-ORDER BY report_month DESC, report_date DESC, cgid
+FROM ClientLevelFiltered
+ORDER BY report_month DESC, report_date DESC, cgid;
