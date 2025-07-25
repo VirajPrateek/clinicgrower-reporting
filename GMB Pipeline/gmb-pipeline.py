@@ -186,7 +186,9 @@ def fetch_performance_data(access_token, location_id, location_title, store_code
             if response.status_code != 200:
                 logger.error(f"Failed for location {location_id}: {response.status_code} {response.text}")
                 response.raise_for_status()
-            return response.json()
+            data = response.json()
+            logger.info(f"Raw response for {location_id}: {json.dumps(data)}")
+            return data
         except requests.HTTPError as e:
             if response.status_code == 403:
                 logger.error(f"Permission denied for location {location_id}: {response.text}")
@@ -205,46 +207,43 @@ def fetch_performance_data(access_token, location_id, location_title, store_code
             return None
     return None
 
-def insert_metrics_to_bigquery(account_id, location_id, location_title, store_code, is_verified, data, start_date, end_date):
-    """Insert pivoted metrics into BigQuery, checking for duplicates."""
+def insert_metrics_to_bigquery(account_id, location_id, location_title, store_code, is_verified, data, start_date, end_date, backfill=False):
+    """Insert or update metrics into BigQuery using MERGE for backfill or daily overwrite."""
     try:
         client = bigquery.Client(project=PROJECT_ID)
         table_ref = client.dataset(DATASET_ID).table(TABLE_ID)
         
-        # Check for existing rows
-        query = f"""
-            SELECT DISTINCT location_id, date
-            FROM `{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}`
-            WHERE location_id = @location_id
-              AND date BETWEEN @start_date AND @end_date
-        """
-        job_config = bigquery.QueryJobConfig(
-            query_parameters=[
-                bigquery.ScalarQueryParameter("location_id", "STRING", location_id),
-                bigquery.ScalarQueryParameter("start_date", "DATE", start_date),
-                bigquery.ScalarQueryParameter("end_date", "DATE", end_date)
-            ]
-        )
-        existing_rows = {(row.location_id, str(row.date)) for row in client.query(query, job_config=job_config)}
-        
         rows_to_insert = []
-        load_timestamp = datetime.utcnow()
+        load_timestamp = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')  # Format as TIMESTAMP string
         metrics_by_date = {}
-        if data:
+
+        if data and 'multiDailyMetricTimeSeries' in data:
             for metric_series in data.get('multiDailyMetricTimeSeries', []):
                 for daily_metric in metric_series.get('dailyMetricTimeSeries', []):
                     metric_name = daily_metric.get('dailyMetric')
                     time_series = daily_metric.get('timeSeries', {}).get('datedValues', [])
                     for dated_value in time_series:
-                        date_str = dated_value.get('date', {})
-                        date_key = f"{date_str.get('year', 2025)}-{date_str.get('month', 5):02d}-{date_str.get('day', 1):02d}"
-                        if (location_id, date_key) in existing_rows:
+                        try:
+                            date_key = date(
+                                int(dated_value['date']['year']),
+                                int(dated_value['date']['month']),
+                                int(dated_value['date']['day'])
+                            ).isoformat()  # Keep as ISO string for DATE casting
+                            date_obj = date.fromisoformat(date_key)
+                            # Filter dates for backfill
+                            if backfill and (date_obj < start_date or date_obj > end_date):
+                                logger.warning(f"Skipping date {date_key} outside backfill range {start_date} to {end_date} for location {location_id}")
+                                continue
+                        except Exception as e:
+                            logger.warning(f"Invalid date format for location {location_id}: {e}")
                             continue
                         value = int(dated_value.get('value', 0))
+                        if value == 0:
+                            logger.warning(f"Zero value for {metric_name} on {date_key} for {location_id}")
                         if date_key not in metrics_by_date:
                             metrics_by_date[date_key] = {metric: 0 for metric in METRICS}
                         metrics_by_date[date_key][metric_name] = value
-        
+
         for date_key, metric_values in metrics_by_date.items():
             row = {
                 'store_id': store_code or 'unknown_store',
@@ -252,26 +251,66 @@ def insert_metrics_to_bigquery(account_id, location_id, location_title, store_co
                 'location_id': location_id,
                 'location_title': location_title,
                 'store_code': store_code or 'unknown_store',
-                'is_verified': is_verified,
-                'date': date_key,
-                'load_timestamp': load_timestamp.strftime('%Y-%m-%d %H:%M:%S')
+                'is_verified': bool(is_verified),  # Ensure boolean type
+                'date': date_key,  # ISO string, will be cast to DATE
+                'load_timestamp': load_timestamp  # TIMESTAMP string
             }
             for metric in METRICS:
                 row[metric] = metric_values.get(metric, 0)
             rows_to_insert.append(row)
-        
+
         if rows_to_insert:
-            errors = client.insert_rows_json(table_ref, rows_to_insert)
-            if errors:
-                logger.error(f"Insert errors for location {location_id}: {errors}")
-                return False
-            # Log one-liner for rows inserted on this date
-            logger.info(f"Inserted {len(rows_to_insert)} rows on {date_key}")
-            return True
-        return False
+            # Prepare rows as an array of structs for BigQuery
+            struct_rows = [
+                {
+                    'store_id': row['store_id'],
+                    'account_id': row['account_id'],
+                    'location_id': row['location_id'],
+                    'location_title': row['location_title'],
+                    'store_code': row['store_code'],
+                    'is_verified': row['is_verified'],
+                    'date': row['date'],  # ISO string for DATE
+                    **{metric: row[metric] for metric in METRICS},
+                    'load_timestamp': row['load_timestamp']  # TIMESTAMP string
+                }
+                for row in rows_to_insert
+            ]
+
+            # Use MERGE with ArrayQueryParameter
+            merge_query = f"""
+                WITH rows AS (
+                    SELECT * FROM UNNEST(@rows)
+                )
+                MERGE `{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}` T
+                USING rows S
+                ON T.location_id = S.location_id AND T.date = S.date
+                WHEN MATCHED THEN
+                    UPDATE SET
+                        T.store_id = S.store_id,
+                        T.account_id = S.account_id,
+                        T.location_title = S.location_title,
+                        T.store_code = S.store_code,
+                        T.is_verified = S.is_verified,
+                        T.load_timestamp = S.load_timestamp,
+                        {', '.join([f'T.{metric} = S.{metric}' for metric in METRICS])}
+                WHEN NOT MATCHED THEN
+                    INSERT (store_id, account_id, location_id, location_title, store_code, is_verified, date, {', '.join(METRICS)}, load_timestamp)
+                    VALUES (S.store_id, S.account_id, S.location_id, S.location_title, S.store_code, S.is_verified, S.date, {', '.join([f'S.{metric}' for metric in METRICS])}, S.load_timestamp)
+            """
+            job_config = bigquery.QueryJobConfig(
+                query_parameters=[
+                    bigquery.ArrayQueryParameter("rows", "STRUCT<store_id STRING, account_id STRING, location_id STRING, location_title STRING, store_code STRING, is_verified BOOLEAN, date DATE, " + ", ".join([f"{metric} INTEGER" for metric in METRICS]) + ", load_timestamp TIMESTAMP>", struct_rows)
+                ],
+                use_legacy_sql=False
+            )
+            query_job = client.query(merge_query, job_config=job_config)
+            query_job.result()  # Wait for the job to complete
+            logger.info(f"Updated/Inserted {len(rows_to_insert)} rows.")
+            return len(rows_to_insert)
+        return 0
     except Exception as e:
-        logger.error(f"Error inserting data for location {location_id}: {e}")
-        return False
+        logger.error(f"Error inserting/updating data for location {location_id}: {e}")
+        return 0
 
 @functions_framework.http
 def gmb_fetch_performance(request):
@@ -292,8 +331,8 @@ def gmb_fetch_performance(request):
                 logger.error(f"Invalid backfill parameters: {e}")
                 return {'status': 'error', 'message': f'Invalid backfill parameters: {e}', 'failed_locations': []}, 400
         else:
-            end_date = (datetime.utcnow() - timedelta(days=1)).date()  # T-1
-            start_date = end_date - timedelta(days=6)  # T-7 to T-1 (7 days)
+            end_date = (datetime.utcnow() - timedelta(days=2)).date()  # T-2 to allow data processing
+            start_date = end_date - timedelta(days=6)  # T-8 to T-2 (7 days)
         logger.info(f"Starting {'backfill' if backfill else 'daily'} run for {start_date} to {end_date}")
         
         # Get target account IDs if specified
@@ -318,13 +357,13 @@ def gmb_fetch_performance(request):
                 location_id = location['name'].split('/')[-1]
                 location_title = location.get('title', 'Unknown')
                 store_code = location.get('storeCode', 'unknown_store')
-                is_verified = location.get('metadata', {}).get('hasVoiceOfMerchant', True)  # Should always be True now
+                is_verified = location.get('metadata', {}).get('hasVoiceOfMerchant', True)
                 performance_data = fetch_performance_data(access_token, location_id, location_title, store_code, is_verified, start_date, end_date)
                 if performance_data:
-                    if insert_metrics_to_bigquery(account_id, location_id, location_title, store_code, is_verified, performance_data, start_date, end_date):
+                    rows_inserted = insert_metrics_to_bigquery(account_id, location_id, location_title, store_code, is_verified, performance_data, start_date, end_date)
+                    if rows_inserted > 0:
                         processed_locations += 1
-                        # Accumulate total rows (approximation based on locations processed)
-                        total_rows += 1  # Adjust if multiple rows per location
+                        total_rows += rows_inserted
                     else:
                         failed_locations.append({
                             'account_id': account_id,
@@ -345,7 +384,7 @@ def gmb_fetch_performance(request):
                     })
         
         # Log total rows inserted
-        logger.info(f"Total rows inserted: {total_rows}")
+        logger.info(f"Total rows inserted/updated: {total_rows}")
         
         response = {
             'status': 'success' if processed_locations > 0 else 'partial_success',
