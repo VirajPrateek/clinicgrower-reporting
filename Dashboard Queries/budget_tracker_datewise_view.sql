@@ -1,3 +1,4 @@
+CREATE OR REPLACE VIEW `dashboard_views.budget_tracker_datewise_view` AS
 WITH
   MetaSpend AS (
     SELECT

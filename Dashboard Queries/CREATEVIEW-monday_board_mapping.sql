@@ -1,6 +1,5 @@
-CREATE OR REPLACE VIEW `clinicgrower-reporting.dashboard_views.monday_board_mapping` AS
+CREATE OR REPLACE VIEW `dashboard_views.monday_board_mapping` AS
 WITH Calendar AS (
-  -- Generate a list of months to report on (last 3 months + current month)
   SELECT
     FORMAT_DATE('%Y-%m', month_start) AS report_month
   FROM UNNEST(
@@ -12,7 +11,6 @@ WITH Calendar AS (
   ) AS month_start
 ),
 RankedItems AS (
-  -- Get all records, ranked by extraction time within each month
   SELECT
     id,
     name,
@@ -135,6 +133,7 @@ LatestData AS (
         )
       ) AS INT64
     ) AS cpl_goal,
+    (SELECT column_text FROM UnnestedData AS sub WHERE sub.id = main.id AND sub.data_month = main.data_month AND sub.column_id = 'people__1') AS ars,
     updated_at,
     _airbyte_extracted_at,
     data_month
@@ -142,7 +141,6 @@ LatestData AS (
   GROUP BY id, name, updated_at, _airbyte_extracted_at, data_month
 ),
 CarryForward AS (
-  -- For each report month, find the most recent budget data prior to or on that month
   SELECT
     cal.report_month,
     ld.id,
@@ -168,6 +166,7 @@ CarryForward AS (
     ld.fb_mtd_spend,
     ld.google_mtd_spend,
     ld.cpl_goal,
+    ld.ars,
     ld.updated_at,
     ld._airbyte_extracted_at,
     ROW_NUMBER() OVER (PARTITION BY ld.id, cal.report_month ORDER BY ld.data_month DESC) AS rn
@@ -200,9 +199,10 @@ SELECT
   fb_mtd_spend,
   google_mtd_spend,
   cpl_goal,
+  ars,
   updated_at,
   _airbyte_extracted_at,
   report_month
 FROM CarryForward
 WHERE rn = 1
-ORDER BY report_month DESC, id
+ORDER BY report_month DESC, id;
