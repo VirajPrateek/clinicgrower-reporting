@@ -1,12 +1,23 @@
-CREATE OR REPLACE VIEW `dashboard_views.metaads_ga4_spend_leads_pivot`
-AS
+CREATE OR REPLACE VIEW `dashboard_views.metaads_ga4_spend_leads_pivot` AS
 WITH StreamMapping AS (
   SELECT
     cg_id AS cgid,
     MAX(ga4_property_id) AS property_id,
-    MAX(client_name) AS client_name
-  FROM `dashboard_views.monday_board_mapping_materialized`
-  WHERE cg_id IS NOT NULL
+    MAX(client_name) AS client_name,
+    MAX(ars) AS ars,
+    MAX(client_status) AS client_status
+  FROM (
+    SELECT
+      cg_id,
+      ga4_property_id,
+      client_name,
+      ars,
+      client_status,
+      ROW_NUMBER() OVER (PARTITION BY cg_id ORDER BY report_month_date DESC, _airbyte_extracted_at DESC) AS rn
+    FROM `dashboard_views.monday_board_mapping_materialized`
+    WHERE cg_id IS NOT NULL
+  ) t
+  WHERE rn = 1
   GROUP BY cg_id
 ),
 EventsAggregated AS (
@@ -39,7 +50,7 @@ EventsAggregated AS (
     COUNTIF(e.event_name = 'appt_noshow_ghl') AS appt_noshow_ghl,
     COUNTIF(e.event_name = 'appt_show_ghl') AS appt_show_ghl
   FROM `clinicgrower-reporting.ga4_custom_rollup.custom_rollup_events` e
-  INNER JOIN StreamMapping smap
+  LEFT JOIN StreamMapping smap
     ON e.property_id = smap.property_id
   WHERE e.event_date_as_date IS NOT NULL
   GROUP BY e.property_id, e.event_date_as_date, e.collected_traffic_source.manual_campaign_name, e.collected_traffic_source.manual_content, e.collected_traffic_source.manual_medium
@@ -48,6 +59,8 @@ MappedEvents AS (
   SELECT
     smap.client_name,
     smap.cgid,
+    smap.ars,
+    smap.client_status,
     e.report_date,
     e.campaign_name,
     e.ad_name,
@@ -80,27 +93,33 @@ MappedEvents AS (
 ),
 DateSpendAgg AS (
   SELECT
-    cgid,
-    client_name,
-    date_spend AS report_date,
-    campaign_name,
-    adset_name,
-    ad_name,
-    SUM(total_spend) AS total_spend_agg,
-    MAX(total_impressions) AS total_impressions,
-    MAX(total_clicks) AS total_clicks,
-    MAX(avg_cpc) AS avg_cpc,
-    MAX(avg_cpm) AS avg_cpm,
-    MAX(avg_ctr) AS avg_ctr,
-    MAX(total_reach) AS total_reach,
-    MAX(total_unique_clicks) AS total_unique_clicks
-  FROM `dashboard_views.metaads_combined_materialized`
-  GROUP BY cgid, client_name, date_spend, campaign_name, adset_name, ad_name
+    m.cgid,
+    m.client_name,
+    s.ars,
+    s.client_status,
+    m.date_spend AS report_date,
+    m.campaign_name,
+    m.adset_name,
+    m.ad_name,
+    SUM(m.total_spend) AS total_spend_agg,
+    SUM(m.total_impressions) AS total_impressions,
+    SUM(m.total_clicks) AS total_clicks,
+    AVG(m.avg_cpc) AS avg_cpc,
+    AVG(m.avg_cpm) AS avg_cpm,
+    AVG(m.avg_ctr) AS avg_ctr,
+    SUM(m.total_reach) AS total_reach,
+    SUM(m.total_unique_clicks) AS total_unique_clicks
+  FROM `dashboard_views.metaads_combined_materialized` m
+  LEFT JOIN StreamMapping s
+    ON m.cgid = s.cgid
+  GROUP BY m.cgid, m.client_name, s.ars, s.client_status, m.date_spend, m.campaign_name, m.adset_name, m.ad_name
 ),
 JoinedData AS (
   SELECT
     COALESCE(m.cgid, a.cgid) AS cgid,
     COALESCE(m.client_name, a.client_name, 'Unknown') AS client_name,
+    COALESCE(m.ars, a.ars) AS ars,
+    COALESCE(m.client_status, a.client_status) AS client_status,
     COALESCE(m.report_date, a.report_date) AS report_date,
     COALESCE(m.campaign_name, a.campaign_name, '(no campaign)') AS campaign_name,
     COALESCE(m.adset_name, a.adset_name, '(no adset)') AS adset_name,
@@ -146,6 +165,8 @@ JoinedData AS (
 SELECT
   cgid,
   client_name,
+  ars,
+  client_status,
   DATE_TRUNC(report_date, MONTH) AS report_month,
   report_date,
   campaign_name,
@@ -182,4 +203,4 @@ SELECT
   total_reach,
   total_unique_clicks
 FROM JoinedData
-ORDER BY report_date DESC, cgid, client_name, campaign_name, adset_name, ad_name
+ORDER BY report_date DESC, cgid, client_name, campaign_name, adset_name, ad_name;
